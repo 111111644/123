@@ -1,74 +1,145 @@
 import streamlit as st
-import pandas as pd
 import requests
+import pandas as pd
+from time import sleep
 
-st.title("低市值币种内在价值套利")
+st.set_page_config(page_title="小市值币种套利工具", layout="wide")
 
-# 1. 获取币种市场数据（取前250个币）
-@st.cache_data(ttl=3600)
-def fetch_market_data():
+# 获取市场币种列表（CoinGecko）
+@st.cache_data(ttl=600)
+def fetch_market_data(per_page=50, page=1):
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
         "vs_currency": "usd",
         "order": "market_cap_asc",
-        "per_page": 250,
-        "page": 1,
-        "price_change_percentage": "24h"
+        "per_page": per_page,
+        "page": page,
+        "sparkline": False
     }
     resp = requests.get(url, params=params)
+    resp.raise_for_status()
     return resp.json()
 
-data = fetch_market_data()
+# 获取某币交易所行情（tickers）
+@st.cache_data(ttl=600)
+def fetch_tickers(coin_id):
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/tickers"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("tickers", [])
 
-# 2. 构造DataFrame并过滤市值小于3千万
-df = pd.DataFrame(data)
-df = df[["id", "symbol", "name", "market_cap"]]
-df = df[df["market_cap"] < 30_000_000]
+# 计算内在价值
+def calc_intrinsic_value(coin, tickers):
+    value = 0
+    memecoins_keywords = ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']
+    name = coin['name'].lower()
 
-# 3. 模拟交易所和类型标签（实际要通过API或手动维护）
-# 这里示例随机给一些币赋予属性，你后续可以扩展完善数据源
-import random
+    has_binance_perp = any(
+        ticker['market'] and 'binance' in ticker['market']['name'].lower() and
+        'perpetual' in (ticker.get('contract_type') or '').lower()
+        for ticker in tickers
+    )
+    has_coinbase_spot = any(
+        ticker['market'] and 'coinbase' in ticker['market']['name'].lower()
+        for ticker in tickers
+    )
+    has_upbit_krw = any(
+        ticker['market'] and 'upbit' in ticker['market']['name'].lower() and
+        'krw' in ticker['target'].lower()
+        for ticker in tickers
+    )
 
-def random_bool():
-    return random.choice([True, False])
+    if has_binance_perp:
+        value += 10_000_000
+    if any(k in name for k in memecoins_keywords):
+        value += 3_000_000
+    if has_coinbase_spot:
+        value += 5_000_000
+    if has_upbit_krw:
+        value += 10_000_000
 
-df["binance_perp"] = df["id"].apply(lambda x: random_bool())
-df["memecoin"] = df["id"].apply(lambda x: random_bool())
-df["coinbase_spot"] = df["id"].apply(lambda x: random_bool())
-df["upbit_krw_spot"] = df["id"].apply(lambda x: random_bool())
+    return value
 
-# 4. 根据你的模型计算内在价值
-def calc_intrinsic_value(row):
-    val = 0
-    if row["binance_perp"]:
-        val += 10_000_000
-    if row["memecoin"]:
-        val += 3_000_000
-    if row["coinbase_spot"]:
-        val += 5_000_000
-    if row["upbit_krw_spot"]:
-        val += 10_000_000
-    return val
+# 新增实时币种数据抓取
+@st.cache_data(ttl=300)
+def fetch_realtime_coins(vs_currency="usd", per_page=50, page=1):
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params = {
+        "vs_currency": vs_currency,
+        "order": "market_cap_desc",
+        "per_page": per_page,
+        "page": page,
+        "sparkline": False,
+    }
+    response = requests.get(url, params=params)
+    response.raise_for_status()
+    return response.json()
 
-df["intrinsic_value"] = df.apply(calc_intrinsic_value, axis=1)
-df["undervalue_pct"] = (df["intrinsic_value"] - df["market_cap"]) / df["intrinsic_value"] * 100
+def show_realtime_data():
+    st.header("实时币种市场数据")
+    coins = fetch_realtime_coins(per_page=50)
+    df = pd.DataFrame(coins)[["name", "symbol", "current_price", "market_cap", "total_volume", "price_change_percentage_24h"]]
+    df.rename(columns={
+        "name": "名称",
+        "symbol": "代码",
+        "current_price": "当前价格 (USD)",
+        "market_cap": "市值 (USD)",
+        "total_volume": "24小时交易量",
+        "price_change_percentage_24h": "24小时涨跌幅 (%)"
+    }, inplace=True)
+    st.dataframe(df)
 
-# 5. 搜索框和过滤
-search = st.text_input("搜索币种（支持名称或符号）").lower()
+def main():
+    st.title("小市值币种套利工具")
 
-if search:
-    df = df[df["name"].str.lower().str.contains(search) | df["symbol"].str.lower().str.contains(search)]
+    st.info("正在抓取币种数据，可能需要几秒钟，请稍等...")
 
-# 6. 排序并显示
-df = df.sort_values(by="undervalue_pct", ascending=False)
+    # 主功能：展示内在价值计算及折价情况
+    market_data = fetch_market_data()
 
-st.dataframe(
-    df[["name", "symbol", "market_cap", "intrinsic_value", "undervalue_pct", "binance_perp", "memecoin", "coinbase_spot", "upbit_krw_spot"]]
-)
+    data = []
+    for coin in market_data:
+        tickers = fetch_tickers(coin['id'])
+        intrinsic_value = calc_intrinsic_value(coin, tickers)
+        fdv = coin.get('fully_diluted_valuation') or 0
+        discount = (intrinsic_value - fdv) / intrinsic_value if intrinsic_value > 0 else 0
 
-st.markdown("""
-### 使用说明：
-- 数据每小时缓存更新
-- 内在价值根据 Binance perp、memecoin、Coinbase spot、Upbit KRW spot 加权计算
-- 低估百分比越高，代表价格越有套利潜力
-""")
+        data.append({
+            "名称": coin['name'],
+            "代码": coin['symbol'].upper(),
+            "FDV (USD)": fdv,
+            "内在价值 (USD)": intrinsic_value,
+            "折价率 %": round(discount * 100, 2),
+            "Binance perp": "是" if any(
+                ticker['market'] and 'binance' in ticker['market']['name'].lower() and
+                'perpetual' in (ticker.get('contract_type') or '').lower()
+                for ticker in tickers
+            ) else "否",
+            "Coinbase spot": "是" if any(
+                ticker['market'] and 'coinbase' in ticker['market']['name'].lower()
+                for ticker in tickers
+            ) else "否",
+            "Upbit KRW": "是" if any(
+                ticker['market'] and 'upbit' in ticker['market']['name'].lower() and
+                'krw' in ticker['target'].lower()
+                for ticker in tickers
+            ) else "否",
+            "是否Memecoin": "是" if any(k in coin['name'].lower() for k in ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']) else "否"
+        })
+
+        sleep(0.5)  # 降低请求频率，避免被限流
+
+    df = pd.DataFrame(data).sort_values(by="折价率 %", ascending=False)
+
+    def highlight_discount(row):
+        return ['background-color: #ffcccc' if row["折价率 %"] > 30 else '' for _ in row]
+
+    st.subheader("币种内在价值折价情况")
+    st.dataframe(df.style.apply(highlight_discount, axis=1), height=700)
+
+    # 新增：展示实时币种数据表
+    show_realtime_data()
+
+if __name__ == "__main__":
+    main()
