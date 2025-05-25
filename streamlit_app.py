@@ -33,20 +33,20 @@ def fetch_tickers(coin_id):
 def calc_intrinsic_value(coin, tickers):
     value = 0
     memecoins_keywords = ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']
-    name = coin['name'].lower()
+    name = coin.get('name', '').lower()
 
     has_binance_perp = any(
-        ticker['market'] and 'binance' in ticker['market']['name'].lower() and
+        ticker.get('market') and 'binance' in ticker['market']['name'].lower() and
         'perpetual' in (ticker.get('contract_type') or '').lower()
         for ticker in tickers
     )
     has_coinbase_spot = any(
-        ticker['market'] and 'coinbase' in ticker['market']['name'].lower()
+        ticker.get('market') and 'coinbase' in ticker['market']['name'].lower()
         for ticker in tickers
     )
     has_upbit_krw = any(
-        ticker['market'] and 'upbit' in ticker['market']['name'].lower() and
-        'krw' in ticker['target'].lower()
+        ticker.get('market') and 'upbit' in ticker['market']['name'].lower() and
+        'krw' in ticker.get('target', '').lower()
         for ticker in tickers
     )
 
@@ -61,7 +61,6 @@ def calc_intrinsic_value(coin, tickers):
 
     return value
 
-# 新增实时币种数据抓取
 @st.cache_data(ttl=300)
 def fetch_realtime_coins(vs_currency="usd", per_page=50, page=1):
     url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -92,43 +91,47 @@ def show_realtime_data():
 
 def main():
     st.title("小市值币种套利工具")
-
     st.info("正在抓取币种数据，可能需要几秒钟，请稍等...")
 
-    # 主功能：展示内在价值计算及折价情况
     market_data = fetch_market_data()
 
     data = []
     for coin in market_data:
-        tickers = fetch_tickers(coin['id'])
-        intrinsic_value = calc_intrinsic_value(coin, tickers)
-        fdv = coin.get('fully_diluted_valuation') or 0
-        discount = (intrinsic_value - fdv) / intrinsic_value if intrinsic_value > 0 else 0
+        try:
+            coin_id = coin.get('id')
+            if not coin_id:
+                continue
+            tickers = fetch_tickers(coin_id)
+            intrinsic_value = calc_intrinsic_value(coin, tickers)
+            fdv = coin.get('fully_diluted_valuation') or 0
+            discount = (intrinsic_value - fdv) / intrinsic_value if intrinsic_value > 0 else 0
 
-        data.append({
-            "名称": coin['name'],
-            "代码": coin['symbol'].upper(),
-            "FDV (USD)": fdv,
-            "内在价值 (USD)": intrinsic_value,
-            "折价率 %": round(discount * 100, 2),
-            "Binance perp": "是" if any(
-                ticker['market'] and 'binance' in ticker['market']['name'].lower() and
-                'perpetual' in (ticker.get('contract_type') or '').lower()
-                for ticker in tickers
-            ) else "否",
-            "Coinbase spot": "是" if any(
-                ticker['market'] and 'coinbase' in ticker['market']['name'].lower()
-                for ticker in tickers
-            ) else "否",
-            "Upbit KRW": "是" if any(
-                ticker['market'] and 'upbit' in ticker['market']['name'].lower() and
-                'krw' in ticker['target'].lower()
-                for ticker in tickers
-            ) else "否",
-            "是否Memecoin": "是" if any(k in coin['name'].lower() for k in ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']) else "否"
-        })
+            data.append({
+                "名称": coin.get('name', '未知'),
+                "代码": coin.get('symbol', 'N/A').upper(),
+                "FDV (USD)": fdv,
+                "内在价值 (USD)": intrinsic_value,
+                "折价率 %": round(discount * 100, 2),
+                "Binance perp": "是" if any(
+                    t.get('market') and 'binance' in t['market']['name'].lower() and
+                    'perpetual' in (t.get('contract_type') or '').lower()
+                    for t in tickers
+                ) else "否",
+                "Coinbase spot": "是" if any(
+                    t.get('market') and 'coinbase' in t['market']['name'].lower()
+                    for t in tickers
+                ) else "否",
+                "Upbit KRW": "是" if any(
+                    t.get('market') and 'upbit' in t['market']['name'].lower() and
+                    'krw' in t.get('target', '').lower()
+                    for t in tickers
+                ) else "否",
+                "是否Memecoin": "是" if any(k in coin.get('name', '').lower() for k in ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']) else "否"
+            })
 
-        sleep(0.5)  # 降低请求频率，避免被限流
+        except Exception as e:
+            st.warning(f"{coin.get('name', '未知币种')} 获取失败: {e}")
+        sleep(0.5)
 
     df = pd.DataFrame(data).sort_values(by="折价率 %", ascending=False)
 
@@ -138,7 +141,6 @@ def main():
     st.subheader("币种内在价值折价情况")
     st.dataframe(df.style.apply(highlight_discount, axis=1), height=700)
 
-    # 新增：展示实时币种数据表
     show_realtime_data()
 
 if __name__ == "__main__":
