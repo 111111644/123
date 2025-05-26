@@ -1,147 +1,100 @@
-import streamlit as st
-import requests
-import pandas as pd
-from time import sleep
+import streamlit as st import pandas as pd import requests
 
-st.set_page_config(page_title="小市值币种套利工具", layout="wide")
+页面设置
 
-# 获取市场币种列表（CoinGecko）
-@st.cache_data(ttl=600)
-def fetch_market_data(per_page=50, page=1):
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": "usd",
-        "order": "market_cap_asc",
-        "per_page": per_page,
-        "page": page,
-        "sparkline": False
-    }
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    return resp.json()
+st.set_page_config(page_title="内在价值估值工具", layout="wide") st.title("低市值币种内在价值估算工具")
 
-# 获取某币交易所行情（tickers）
-@st.cache_data(ttl=600)
-def fetch_tickers(coin_id):
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/tickers"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("tickers", [])
+st.markdown(""" 此工具根据你定义的模型，对币种进行内在价值计算并排序：
 
-# 计算内在价值
-def calc_intrinsic_value(coin, tickers):
-    value = 0
-    memecoins_keywords = ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']
-    name = coin.get('name', '').lower()
+Binance perp = $10M
 
-    has_binance_perp = any(
-        ticker.get('market') and 'binance' in ticker['market']['name'].lower() and
-        'perpetual' in (ticker.get('contract_type') or '').lower()
-        for ticker in tickers
-    )
-    has_coinbase_spot = any(
-        ticker.get('market') and 'coinbase' in ticker['market']['name'].lower()
-        for ticker in tickers
-    )
-    has_upbit_krw = any(
-        ticker.get('market') and 'upbit' in ticker['market']['name'].lower() and
-        'krw' in ticker.get('target', '').lower()
-        for ticker in tickers
-    )
+memecoin = $3M
 
+Coinbase 现货 = $5M
+
+Upbit 韩元交易对 = $10M """)
+
+
+定义估值规则
+
+VALUE_BINANCE_PERP = 10_000_000 VALUE_MEME = 3_000_000 VALUE_COINBASE = 5_000_000 VALUE_UPBIT = 10_000_000
+
+获取 CoinGecko 上的所有币种市值数据（前250个市值最小的）
+
+def get_coin_data(): url = "https://api.coingecko.com/api/v3/coins/markets" params = { 'vs_currency': 'usd', 'order': 'market_cap_asc',  # 按市值升序 'per_page': 250, 'page': 1, 'sparkline': False } response = requests.get(url, params=params) return response.json()
+
+获取是否是 memecoin
+
+MEME_KEYWORDS = ['meme']
+
+def is_memecoin(tags): if not tags: return False for tag in tags: if any(keyword in tag.lower() for keyword in MEME_KEYWORDS): return True return False
+
+判断是否有在各大交易所上线（简化逻辑）
+
+def fetch_exchange_data(coin_id): url = f"https://api.coingecko.com/api/v3/coins/{coin_id}" resp = requests.get(url) if resp.status_code != 200: return None data = resp.json() tickers = data.get("tickers", [])
+
+has_binance_perp = any(
+    t.get("market", {}).get("name") == "Binance" and "perp" in t.get("symbol", "").lower()
+    for t in tickers)
+has_coinbase = any("Coinbase" in t.get("market", {}).get("name", "") for t in tickers)
+has_upbit_krw = any("Upbit" in t.get("market", {}).get("name", "") and 
+                    t.get("target", "").upper() == "KRW"
+                    for t in tickers)
+
+return has_binance_perp, has_coinbase, has_upbit_krw
+
+主函数
+
+with st.spinner("正在抓取实时币种数据..."): coins = get_coin_data() result = []
+
+for coin in coins:
+    if coin['market_cap'] is None or coin['market_cap'] > 30_000_000:
+        continue  # 只分析低市值币种
+
+    coin_id = coin['id']
+    name = coin['name']
+    symbol = coin['symbol'].upper()
+    market_cap = coin['market_cap']
+
+    extra = fetch_exchange_data(coin_id)
+    if extra is None:
+        continue
+
+    has_binance_perp, has_coinbase, has_upbit_krw = extra
+
+    # 获取是否为meme币（根据tags）
+    tags = coin.get("categories") or coin.get("tags") or []
+    meme_flag = is_memecoin(tags)
+
+    intrinsic = 0
     if has_binance_perp:
-        value += 10_000_000
-    if any(k in name for k in memecoins_keywords):
-        value += 3_000_000
-    if has_coinbase_spot:
-        value += 5_000_000
+        intrinsic += VALUE_BINANCE_PERP
+    if meme_flag:
+        intrinsic += VALUE_MEME
+    if has_coinbase:
+        intrinsic += VALUE_COINBASE
     if has_upbit_krw:
-        value += 10_000_000
+        intrinsic += VALUE_UPBIT
 
-    return value
+    under_value = intrinsic - market_cap
 
-@st.cache_data(ttl=300)
-def fetch_realtime_coins(vs_currency="usd", per_page=50, page=1):
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": vs_currency,
-        "order": "market_cap_desc",
-        "per_page": per_page,
-        "page": page,
-        "sparkline": False,
-    }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    return response.json()
+    result.append({
+        "币种": name,
+        "代码": symbol,
+        "现市值 ($)": market_cap,
+        "估算内在价值 ($)": intrinsic,
+        "低估程度 ($)": under_value,
+        "Binance perp": "有" if has_binance_perp else "无",
+        "Coinbase": "有" if has_coinbase else "无",
+        "Upbit KRW": "有" if has_upbit_krw else "无",
+        "是Memecoin": "是" if meme_flag else "否",
+    })
 
-def show_realtime_data():
-    st.header("实时币种市场数据")
-    coins = fetch_realtime_coins(per_page=50)
-    df = pd.DataFrame(coins)[["name", "symbol", "current_price", "market_cap", "total_volume", "price_change_percentage_24h"]]
-    df.rename(columns={
-        "name": "名称",
-        "symbol": "代码",
-        "current_price": "当前价格 (USD)",
-        "market_cap": "市值 (USD)",
-        "total_volume": "24小时交易量",
-        "price_change_percentage_24h": "24小时涨跌幅 (%)"
-    }, inplace=True)
-    st.dataframe(df)
+df = pd.DataFrame(result)
+df = df.sort_values(by="低估程度 ($)", ascending=False)
 
-def main():
-    st.title("小市值币种套利工具")
-    st.info("正在抓取币种数据，可能需要几秒钟，请稍等...")
+st.success(f"共分析 {len(df)} 个低市值币种")
+st.dataframe(df, use_container_width=True)
 
-    market_data = fetch_market_data()
+st.caption("数据来源：CoinGecko API，仅供学习交流")
 
-    data = []
-    for coin in market_data:
-        try:
-            coin_id = coin.get('id')
-            if not coin_id:
-                continue
-            tickers = fetch_tickers(coin_id)
-            intrinsic_value = calc_intrinsic_value(coin, tickers)
-            fdv = coin.get('fully_diluted_valuation') or 0
-            discount = (intrinsic_value - fdv) / intrinsic_value if intrinsic_value > 0 else 0
-
-            data.append({
-                "名称": coin.get('name', '未知'),
-                "代码": coin.get('symbol', 'N/A').upper(),
-                "FDV (USD)": fdv,
-                "内在价值 (USD)": intrinsic_value,
-                "折价率 %": round(discount * 100, 2),
-                "Binance perp": "是" if any(
-                    t.get('market') and 'binance' in t['market']['name'].lower() and
-                    'perpetual' in (t.get('contract_type') or '').lower()
-                    for t in tickers
-                ) else "否",
-                "Coinbase spot": "是" if any(
-                    t.get('market') and 'coinbase' in t['market']['name'].lower()
-                    for t in tickers
-                ) else "否",
-                "Upbit KRW": "是" if any(
-                    t.get('market') and 'upbit' in t['market']['name'].lower() and
-                    'krw' in t.get('target', '').lower()
-                    for t in tickers
-                ) else "否",
-                "是否Memecoin": "是" if any(k in coin.get('name', '').lower() for k in ['doge', 'shiba', 'bonk', 'pepe', 'cat', 'elon']) else "否"
-            })
-
-        except Exception as e:
-            st.warning(f"{coin.get('name', '未知币种')} 获取失败: {e}")
-        sleep(0.5)
-
-    df = pd.DataFrame(data).sort_values(by="折价率 %", ascending=False)
-
-    def highlight_discount(row):
-        return ['background-color: #ffcccc' if row["折价率 %"] > 30 else '' for _ in row]
-
-    st.subheader("币种内在价值折价情况")
-    st.dataframe(df.style.apply(highlight_discount, axis=1), height=700)
-
-    show_realtime_data()
-
-if __name__ == "__main__":
-    main()
